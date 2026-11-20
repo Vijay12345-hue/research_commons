@@ -4,6 +4,14 @@ from unittest.mock import patch
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.urls import reverse
+from io import BytesIO
+from unittest.mock import MagicMock, patch
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from minio.error import S3Error
+from pypdf import PdfWriter
+
+from .models import ResearchIngestion
 
 from .models import (
     ResearchResource,
@@ -551,3 +559,215 @@ class ResearchLibraryTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
+
+class ResearchIngestionTests(TestCase):
+
+    def setUp(self):
+        self.member = User.objects.create_user(
+            username="ingestion_student",
+            email="ingestion@example.com",
+            password="TestPass123!",
+        )
+
+        pdf_buffer = BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.add_metadata({
+            "/Title": "Test Research PDF",
+            "/Author": "Test Author",
+        })
+        writer.write(pdf_buffer)
+
+        self.pdf_data = pdf_buffer.getvalue()
+
+        self.resource = ResearchResource.objects.create(
+            title="Test Research Paper",
+            resource_type="paper",
+            uploaded_by=self.member,
+            file=SimpleUploadedFile(
+                "test_research.pdf",
+                self.pdf_data,
+                content_type="application/pdf",
+            ),
+        )
+
+    def tearDown(self):
+        if self.resource.file:
+            self.resource.file.delete(save=False)
+
+    def test_pdf_metadata_extraction(self):
+        from .ingestion import extract_pdf_metadata
+
+        import hashlib
+
+        checksum = hashlib.sha256(self.pdf_data).hexdigest()
+
+        metadata = extract_pdf_metadata(
+            self.pdf_data,
+            self.resource,
+            checksum,
+            len(self.pdf_data),
+        )
+
+        self.assertEqual(metadata["resource_id"], self.resource.id)
+        self.assertEqual(metadata["pdf_title"], "Test Research PDF")
+        self.assertEqual(metadata["author"], "Test Author")
+        self.assertEqual(metadata["file_format"], "PDF")
+        self.assertEqual(metadata["checksum_sha256"], checksum)
+
+    @patch("research_library.ingestion.PdfReader")
+    def test_processed_text_extraction_and_normalization(self, mock_reader):
+        from .ingestion import extract_processed_document
+
+        page = MagicMock()
+        page.extract_text.return_value = (
+            "  Research   Commons   \n\n\n  Machine Learning  "
+        )
+
+        mock_reader.return_value.pages = [page]
+
+        result = extract_processed_document(
+            self.pdf_data,
+            self.resource,
+            "test-checksum",
+        )
+
+        self.assertEqual(result["page_count"], 1)
+        self.assertEqual(result["processing_status"], "completed")
+        self.assertGreater(result["total_characters"], 0)
+        self.assertEqual(
+            result["extracted_pages"][0]["text"],
+            "Research Commons\n\nMachine Learning",
+        )
+
+    def test_invalid_pdf_is_rejected(self):
+        from .ingestion import ingest_research_resource
+
+        invalid_resource = ResearchResource.objects.create(
+            title="Invalid PDF",
+            resource_type="paper",
+            uploaded_by=self.member,
+            file=SimpleUploadedFile(
+                "invalid.pdf",
+                b"This is not a PDF file",
+                content_type="application/pdf",
+            ),
+        )
+
+        try:
+            with self.assertRaises(ValueError):
+                ingest_research_resource(invalid_resource)
+        finally:
+            invalid_resource.file.delete(save=False)
+
+    @patch("research_library.object_storage.get_minio_client")
+    def test_successful_ingestion_uploads_all_three_objects(
+        self, mock_get_client
+    ):
+        from .ingestion import ingest_research_resource
+
+        class FakeMinioClient:
+            def __init__(self):
+                self.objects = set()
+                self.uploaded_objects = []
+
+            def stat_object(self, bucket, object_key):
+                if object_key not in self.objects:
+                    raise S3Error(
+                        None,
+                        "NoSuchKey",
+                        "Object does not exist",
+                        object_key,
+                        "",
+                        "",
+                    )
+
+                return MagicMock(size=100)
+
+            def put_object(
+                self,
+                bucket_name,
+                object_name,
+                data,
+                length,
+                content_type,
+                **kwargs,
+            ):
+                self.objects.add(object_name)
+                self.uploaded_objects.append(object_name)
+
+        fake_client = FakeMinioClient()
+        mock_get_client.return_value = fake_client
+
+        ingestion = ingest_research_resource(self.resource)
+
+        checksum = ingestion.checksum_sha256
+
+        expected_objects = {
+            f"raw/{checksum}.pdf",
+            f"metadata/{checksum}.json",
+            f"processed/{checksum}.json",
+        }
+
+        self.assertEqual(ingestion.status, "completed")
+        self.assertEqual(fake_client.objects, expected_objects)
+        self.assertEqual(len(fake_client.uploaded_objects), 3)
+
+        self.assertTrue(
+            ResearchIngestion.objects.filter(
+                resource=self.resource
+            ).exists()
+        )
+
+    @patch("research_library.object_storage.get_minio_client")
+    def test_repeated_ingestion_is_idempotent(self, mock_get_client):
+        from .ingestion import ingest_research_resource
+
+        class FakeMinioClient:
+            def __init__(self):
+                self.objects = set()
+                self.uploaded_objects = []
+
+            def stat_object(self, bucket, object_key):
+                if object_key not in self.objects:
+                    raise S3Error(
+                        None,
+                        "NoSuchKey",
+                        "Object does not exist",
+                        object_key,
+                        "",
+                        "",
+                    )
+
+                return MagicMock(size=100)
+
+            def put_object(
+                self,
+                bucket_name,
+                object_name,
+                data,
+                length,
+                content_type,
+                **kwargs,
+            ):
+                self.objects.add(object_name)
+                self.uploaded_objects.append(object_name)
+
+        fake_client = FakeMinioClient()
+        mock_get_client.return_value = fake_client
+
+        first_result = ingest_research_resource(self.resource)
+        second_result = ingest_research_resource(self.resource)
+        third_result = ingest_research_resource(self.resource)
+
+        self.assertEqual(first_result.pk, second_result.pk)
+        self.assertEqual(second_result.pk, third_result.pk)
+
+        self.assertEqual(
+            ResearchIngestion.objects.filter(
+                resource=self.resource
+            ).count(),
+            1,
+        )
+
+        self.assertEqual(len(fake_client.uploaded_objects), 3)

@@ -239,3 +239,66 @@ class CollectionItem(models.Model):
 
     def __str__(self):
         return f"{self.saved_item.resource.title} in {self.collection.name}"
+
+class ResearchIngestion(models.Model):
+
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+    ]
+
+    resource = models.OneToOneField(
+        ResearchResource,
+        on_delete=models.CASCADE,
+        related_name="ingestion",
+    )
+
+    bucket_name = models.CharField(
+        max_length=100,
+        default="research-commons",
+    )
+
+    object_key = models.CharField(
+        max_length=500,
+    )
+
+    checksum_sha256 = models.CharField(
+        max_length=64,
+        db_index=True,
+    )
+
+    file_size = models.PositiveBigIntegerField()
+
+    content_type = models.CharField(
+        max_length=100,
+        default="application/pdf",
+    )
+    metadata_json = models.JSONField(default=dict, blank=True)
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="pending",
+    )
+
+    error_message = models.TextField(
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    ingested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Research Ingestion"
+        verbose_name_plural = "Research Ingestions"
+
+    def __str__(self):
+        return f"{self.resource.title} - {self.status}"

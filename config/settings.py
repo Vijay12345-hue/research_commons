@@ -24,8 +24,7 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-m@o9=-d&z4l*b3abkgjj(m)ftv1!i%7dm30^r2p&doz6)=g&su'
-
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
@@ -157,3 +156,9 @@ LOGOUT_REDIRECT_URL = "/"
 # Research paper and library resource uploads
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+# MinIO object storage configuration
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "research-commons")
+MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"

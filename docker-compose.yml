@@ -22,5 +22,23 @@ services:
       timeout: 5s
       retries: 5
 
+  minio:
+    image: docker.io/pgsty/silo:RELEASE.2026-11-12T00-00-00Z
+    container_name: research_commons_minio
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+    volumes:
+      - research_commons_minio_data:/data
+
 volumes:
   research_commons_data:
+  research_commons_minio_data:
